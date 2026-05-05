@@ -216,6 +216,10 @@ AuthMatrix/
 
 ---
 
+## Improvements
+- Ctrl+R to send in the repeater the detail of request
+- Clear All Requests button to only clear requests
+
 ## License
 
 MIT
