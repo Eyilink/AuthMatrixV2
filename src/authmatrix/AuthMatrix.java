@@ -56,6 +56,10 @@ public class AuthMatrix implements BurpExtension {
     private JTextPane  detailResponsePane;
     private boolean    detailVisible = false;
 
+    // Currently displayed request (for Ctrl+R → Send to Repeater)
+    private HttpRequest currentDetailRequest = null;
+    private HttpService currentDetailService = null;
+
     // ── Dark theme palette ────────────────────────────────────────────────────
     private static final Color BG          = new Color(0x1E, 0x1E, 0x1E);
     private static final Color FG          = new Color(0xD4, 0xD4, 0xD4);
@@ -206,7 +210,18 @@ public class AuthMatrix implements BurpExtension {
             int row = tbl.getSelectedRow();
             if (row >= 0) { users.remove(row); userModel.removeRow(row); rebuildResultColumns(); }
         });
-        btns.add(add); btns.add(del);
+        JButton delAll = new JButton("Remove All");
+        delAll.setForeground(new Color(180, 0, 0));
+        delAll.addActionListener(e -> {
+            if (users.isEmpty()) return;
+            int confirm = JOptionPane.showConfirmDialog(null,
+                    "Remove all users?", "AuthMatrix", JOptionPane.YES_NO_OPTION);
+            if (confirm != JOptionPane.YES_OPTION) return;
+            users.clear();
+            userModel.setRowCount(0);
+            rebuildResultColumns();
+        });
+        btns.add(add); btns.add(del); btns.add(delAll);
 
         installHideColumnMenu(tbl);   // ← hide-column right-click menu
         p.add(new JScrollPane(tbl), BorderLayout.CENTER);
@@ -274,9 +289,22 @@ public class AuthMatrix implements BurpExtension {
                 if (row < resultModel.getRowCount()) resultModel.removeRow(row);
             }
         });
+        JButton delAll = new JButton("Remove All");
+        delAll.setForeground(new Color(180, 0, 0));
+        delAll.addActionListener(e -> {
+            if (requests.isEmpty()) return;
+            int confirm = JOptionPane.showConfirmDialog(null,
+                    "Remove all requests?", "AuthMatrix", JOptionPane.YES_NO_OPTION);
+            if (confirm != JOptionPane.YES_OPTION) return;
+            requests.clear();
+            requestModel.setRowCount(0);
+            resultModel.setRowCount(0);
+            rebuildResultStore();
+            hideDetail();
+        });
         JLabel hint = new JLabel("  ← Right-click any Burp request → 'Send to AuthMatrix'");
         hint.setForeground(Color.GRAY);
-        btns.add(del); btns.add(hint);
+        btns.add(del); btns.add(delAll); btns.add(hint);
 
         installHideColumnMenu(tbl);   // ← hide-column right-click menu
         p.add(new JScrollPane(tbl), BorderLayout.CENTER);
@@ -336,6 +364,28 @@ public class AuthMatrix implements BurpExtension {
         split.setBorder(null);
         split.setBackground(BG);
 
+        // ── Ctrl+R → Send to Repeater ─────────────────────────────────────────
+        KeyStroke ctrlR = KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK);
+        Action sendToRepeater = new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { sendCurrentToRepeater(); }
+        };
+        for (JTextPane pane : new JTextPane[]{detailRequestPane, detailResponsePane}) {
+            pane.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(ctrlR, "sendToRepeater");
+            pane.getActionMap().put("sendToRepeater", sendToRepeater);
+        }
+        // Also bind on the split pane so it works wherever focus is in the panel
+        split.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(ctrlR, "sendToRepeater");
+        split.getActionMap().put("sendToRepeater", sendToRepeater);
+
+        // Hint bar
+        JLabel hint = new JLabel("  Ctrl+R  →  Send request to Repeater");
+        hint.setForeground(new Color(0xAA, 0xAA, 0xAA));
+        hint.setBackground(new Color(0x2A, 0x2A, 0x2A));
+        hint.setFont(hint.getFont().deriveFont(Font.PLAIN, 11f));
+        hint.setOpaque(true);
+        hint.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+
+        p.add(hint,  BorderLayout.NORTH);
         p.add(split, BorderLayout.CENTER);
         p.setBackground(BG);
         return p;
@@ -551,6 +601,12 @@ public class AuthMatrix implements BurpExtension {
         TestResult tr = resultStore[ri][ui];
         if (tr == null) return;  // not tested yet – ignore click
 
+        // Store for Ctrl+R
+        if (ri < requests.size()) {
+            currentDetailRequest = requests.get(ri).request;
+            currentDetailService = requests.get(ri).service;
+        }
+
         renderHttp(detailRequestPane,  tr.rawRequest,  true);
         renderHttp(detailResponsePane, tr.rawResponse, false);
 
@@ -570,8 +626,32 @@ public class AuthMatrix implements BurpExtension {
         detailVisible = false;
         detailRequestPane.setText("");
         detailResponsePane.setText("");
+        currentDetailRequest = null;
+        currentDetailService = null;
     }
 
+
+    /** Sends the currently displayed request to Burp Repeater (Ctrl+R). */
+    private void sendCurrentToRepeater() {
+        if (currentDetailRequest == null) return;
+        try {
+            HttpRequest requestToSend;
+            if (currentDetailService != null) {
+                // Combine the stored request bytes with the stored service
+                requestToSend = HttpRequest.httpRequest(
+                        currentDetailService, currentDetailRequest.toByteArray());
+            } else {
+                requestToSend = currentDetailRequest;
+            }
+            api.repeater().sendToRepeater(requestToSend, "AuthMatrix");
+            api.logging().logToOutput("AuthMatrix: request sent to Repeater.");
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(null,
+                    "Could not send to Repeater: " + ex.getMessage(),
+                    "AuthMatrix", JOptionPane.ERROR_MESSAGE);
+            api.logging().logToError("AuthMatrix sendToRepeater: " + ex.getMessage());
+        }
+    }
     /**
      * Render an HTTP message into a JTextPane with dark Repeater-style syntax colouring.
      *
@@ -994,7 +1074,7 @@ public class AuthMatrix implements BurpExtension {
 
                 JPopupMenu menu = new JPopupMenu();
 
-                JMenuItem hideItem = new JMenuItem("Hide column  "" + table.getColumnName(viewCol) + """);
+                JMenuItem hideItem = new JMenuItem("Hide column  \"" + table.getColumnName(viewCol) + "\"");
                 hideItem.addActionListener(ev -> {
                     TableColumn tc = table.getColumnModel().getColumn(viewCol);
                     hiddenCols.put(modelCol, tc.getWidth());
@@ -1073,14 +1153,14 @@ public class AuthMatrix implements BurpExtension {
         // ── Fill down ────────────────────────────────────────────────────────
         if (selected.length > 1) {
             JMenuItem fillEU = new JMenuItem(
-                    "Fill down Expected Users  "" + euValue + ""  → " + selected.length + " rows");
+                    "Fill down Expected Users  \"" + euValue + "\"  → " + selected.length + " rows");
             fillEU.setEnabled(!euValue.isEmpty());
             fillEU.addActionListener(ev -> {
                 for (int r : selected) requestModel.setValueAt(euValue, r, 2);
             });
 
             JMenuItem fillER = new JMenuItem(
-                    "Fill down Expected Roles  "" + erValue + ""  → " + selected.length + " rows");
+                    "Fill down Expected Roles  \"" + erValue + "\"  → " + selected.length + " rows");
             fillER.setEnabled(!erValue.isEmpty());
             fillER.addActionListener(ev -> {
                 for (int r : selected) requestModel.setValueAt(erValue, r, 3);
